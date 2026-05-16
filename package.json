@@ -1,0 +1,49 @@
+{
+  "name": "shrimp-jsonguard",
+  "version": "1.4.0",
+  "description": "The most resilient JSON repair engine for LLM output. Zero dependencies. One click to heal your JSON pains.",
+  "main": "jsonguard.js",
+  "exports": {
+    ".": {
+      "require": "./jsonguard.js",
+      "import": "./jsonguard.mjs"
+    }
+  },
+  "scripts": {
+    "test": "node test.js"
+  },
+  "keywords": [
+    "json",
+    "repair",
+    "fix",
+    "llm",
+    "parse",
+    "guard",
+    "broken",
+    "malformed",
+    "truncated",
+    "ai",
+    "chatgpt",
+    "gemini",
+    "claude"
+  ],
+  "author": "Shrimp Clan (蝦家班)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cmwang2021/shrimp-jsonguard"
+  },
+  "homepage": "https://github.com/cmwang2021/shrimp-jsonguard#readme",
+  "bugs": {
+    "url": "https://github.com/cmwang2021/shrimp-jsonguard/issues"
+  },
+  "engines": {
+    "node": ">=12.0.0"
+  },
+  "files": [
+    "jsonguard.js",
+    "jsonguard.mjs",
+    "README.md",
+    "LICENSE"
+  ]
+}
