@@ -1,12 +1,14 @@
 {
   "name": "shrimp-jsonguard",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "The most resilient JSON repair engine for LLM output. Zero dependencies. One click to heal your JSON pains.",
   "main": "jsonguard.js",
+  "types": "index.d.ts",
   "exports": {
     ".": {
       "require": "./jsonguard.js",
-      "import": "./jsonguard.mjs"
+      "import": "./jsonguard.mjs",
+      "types": "./index.d.ts"
     }
   },
   "scripts": {
@@ -38,11 +40,12 @@
     "url": "https://github.com/cmwang2021/shrimp-jsonguard/issues"
   },
   "engines": {
-    "node": ">=12.0.0"
+    "node": ">=14.0.0"
   },
   "files": [
     "jsonguard.js",
     "jsonguard.mjs",
+    "index.d.ts",
     "README.md",
     "LICENSE"
   ]

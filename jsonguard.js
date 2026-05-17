@@ -1,6 +1,6 @@
 /**
  * @module jsonguard
- * @version 1.4.0
+ * @version 1.4.1
  * @description Deterministic JSON repair engine for LLM output.
  *
  * Implements a three-phase repair pipeline:
@@ -20,6 +20,12 @@
  *   • Defence-in-depth — regex for *text cleanup*, state machine for
  *     *structural repair*.  Never the other way around.
  *
+ * Performance:
+ *   • O(n) time complexity — single-pass state machine, no backtracking.
+ *   • Array-buffered output — avoids O(n²) string concatenation.
+ *   • Input size guard — rejects payloads exceeding MAX_INPUT_LENGTH
+ *     to prevent denial-of-service on untrusted input.
+ *
  * @example
  *   const jsonguard = require('./jsonguard');
  *   const obj = jsonguard('```json\n{"name": "Shrimp Clan", "status": "Hero",');
@@ -32,6 +38,19 @@
  */
 
 'use strict';
+
+// ─────────────────────────────────────────────────────────
+//  Configuration
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Maximum input length in characters.  Inputs exceeding this limit are
+ * rejected immediately to guard against accidental or malicious DoS.
+ * Override via `jsonguard.MAX_INPUT_LENGTH = <number>`.
+ *
+ * @type {number}
+ */
+var MAX_INPUT_LENGTH = 5 * 1024 * 1024; // 5 MB
 
 // ─────────────────────────────────────────────────────────
 //  Phase 0 — Extract: isolate the JSON payload from noise
@@ -55,11 +74,13 @@ function stripMarkdownFences(s) {
  * We use a small state tracker so that `//` inside `"url: //example"` is
  * left intact.
  *
+ * Uses Array buffer for O(n) output assembly.
+ *
  * @param {string} s
  * @returns {string}
  */
 function stripComments(s) {
-  var out = '';
+  var buf = [];
   var inStr = false;
   var esc = false;
   var i = 0;
@@ -70,7 +91,7 @@ function stripComments(s) {
 
     // ── inside a JSON string ──
     if (inStr) {
-      out += ch;
+      buf.push(ch);
       if (esc)        { esc = false; }
       else if (ch === '\\') { esc = true; }
       else if (ch === '"')  { inStr = false; }
@@ -81,7 +102,7 @@ function stripComments(s) {
     // ── outside a string ──
     if (ch === '"') {
       inStr = true;
-      out += ch;
+      buf.push(ch);
       i++;
       continue;
     }
@@ -102,17 +123,20 @@ function stripComments(s) {
       continue;
     }
 
-    out += ch;
+    buf.push(ch);
     i++;
   }
 
-  return out;
+  return buf.join('');
 }
 
 /**
  * Locate the outermost JSON structure within a larger string.
  * Finds the first `{` or `[` and the last matching `}` or `]`,
  * discarding any surrounding prose such as "Here is the JSON:".
+ *
+ * Handles truncated inputs correctly by counting bracket depth — if the
+ * outermost structure is never closed, keeps everything to EOF.
  *
  * @param {string} s  Pre-cleaned string (fences and comments removed).
  * @returns {string}   The extracted substring, or the original if no
@@ -205,9 +229,11 @@ function isKeyStart(ch) {
 
 /**
  * Return `true` if `ch` can continue an unquoted key.
+ * Includes hyphen (-) and dot (.) to support kebab-case and dotted keys
+ * commonly seen in JSON5 / JS-style objects.
  */
 function isKeyChar(ch) {
-  return /[a-zA-Z0-9_$]/.test(ch);
+  return /[a-zA-Z0-9_$\-.]/.test(ch);
 }
 
 /**
@@ -223,12 +249,28 @@ function matchIllegalLiteral(s, i) {
     if (s.substring(i, i + token.length) === token) {
       // Make sure the next character is not alphanumeric (word boundary).
       var next = s[i + token.length];
-      if (!next || !isKeyChar(next)) {
+      if (!next || !/[a-zA-Z0-9_$]/.test(next)) {
         return token;
       }
     }
   }
   return null;
+}
+
+/**
+ * Find the last significant (non-whitespace) character in a buffer array.
+ *
+ * @param {string[]} buf  The output buffer.
+ * @returns {string}      The last non-whitespace character, or ''.
+ */
+function lastSignificant(buf) {
+  for (var j = buf.length - 1; j >= 0; j--) {
+    var c = buf[j];
+    if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') {
+      return c;
+    }
+  }
+  return '';
 }
 
 /**
@@ -243,13 +285,16 @@ function matchIllegalLiteral(s, i) {
  * At each position the engine asks "does the next token violate JSON
  * grammar?" and, if so, applies the minimal fix.
  *
+ * Output is assembled in an Array buffer and joined once at the end,
+ * giving O(n) performance instead of O(n²) from string concatenation.
+ *
  * @param {string} s  Cleaned payload from Phase 0.
  * @returns {string}  Structurally repaired JSON string.
  */
 function repairJSON(s) {
   if (!s || s.length === 0) { return '""'; }
 
-  var out = '';
+  var buf = [];        // output buffer — joined once at the end
   var stack = [];      // container stack: '{' | '['
   var inStr = false;
   var esc = false;
@@ -273,13 +318,8 @@ function repairJSON(s) {
   // True immediately after `{` or after a comma inside an object.
   function expectingKey() {
     if (top() !== '{') return false;
-    // Walk backwards through `out` skipping whitespace
-    for (var j = out.length - 1; j >= 0; j--) {
-      var c = out[j];
-      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') continue;
-      return c === '{' || c === ',';
-    }
-    return false;
+    var ls = lastSignificant(buf);
+    return ls === '{' || ls === ',';
   }
 
   while (i < len) {
@@ -292,26 +332,26 @@ function repairJSON(s) {
       if (esc) {
         // R12 — Invalid escape sequences: keep the character, drop the backslash
         //       for truly invalid escapes, but JSON.parse handles standard ones.
-        var validEsc = '"\\\/bfnrtu';
+        var validEsc = '"\\\\/bfnrtu';
         if (validEsc.indexOf(ch) === -1) {
           // Not a valid JSON escape — remove the backslash we already emitted
-          out = out.substring(0, out.length - 1);
+          buf.pop();
         }
-        out += ch;
+        buf.push(ch);
         esc = false;
         i++;
         continue;
       }
       if (ch === '\\') {
         esc = true;
-        out += ch;
+        buf.push(ch);
         i++;
         continue;
       }
       if (ch === '"') {
         // Closing quote
         inStr = false;
-        out += ch;
+        buf.push(ch);
         i++;
         continue;
       }
@@ -320,7 +360,7 @@ function repairJSON(s) {
       if (ch === "'") {
         // Treat as end of string (single-quote string mode)
         inStr = false;
-        out += '"';
+        buf.push('"');
         i++;
         continue;
       }
@@ -328,11 +368,11 @@ function repairJSON(s) {
       if (ch === '\n' || ch === '\r' || ch === '\t') {
         // Escape literal control characters inside strings
         var escMap = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
-        out += escMap[ch];
+        buf.push(escMap[ch]);
         i++;
         continue;
       }
-      out += ch;
+      buf.push(ch);
       i++;
       continue;
     }
@@ -343,7 +383,7 @@ function repairJSON(s) {
 
     // Skip whitespace (emit it)
     if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
-      out += ch;
+      buf.push(ch);
       i++;
       continue;
     }
@@ -361,22 +401,20 @@ function repairJSON(s) {
         i++; // drop this comma, the next one will be evaluated
         continue;
       }
+      // Trailing comma at EOF
+      if (nextSig === '') {
+        i++; // drop the comma — will be at end of input
+        continue;
+      }
       // Comma after opening { or [ (leading comma) — drop it
-      if (out.length > 0) {
-        var lastSig = '';
-        for (var b = out.length - 1; b >= 0; b--) {
-          var bc = out[b];
-          if (bc !== ' ' && bc !== '\t' && bc !== '\n' && bc !== '\r') {
-            lastSig = bc;
-            break;
-          }
-        }
+      if (buf.length > 0) {
+        var lastSig = lastSignificant(buf);
         if (lastSig === '{' || lastSig === '[') {
           i++;
           continue;
         }
       }
-      out += ch;
+      buf.push(ch);
       i++;
       continue;
     }
@@ -385,26 +423,19 @@ function repairJSON(s) {
     if (ch === '{' || ch === '[') {
       // R5 — Missing comma: if the previous significant char was a value
       //       terminator (", digit, true/false/null closer, }, ]), we need a comma.
-      if (out.length > 0) {
-        var prev = '';
-        for (var p = out.length - 1; p >= 0; p--) {
-          var pc = out[p];
-          if (pc !== ' ' && pc !== '\t' && pc !== '\n' && pc !== '\r') {
-            prev = pc;
-            break;
-          }
-        }
+      if (buf.length > 0) {
+        var prev = lastSignificant(buf);
         if (prev === '"' || prev === '}' || prev === ']' ||
             /[0-9]/.test(prev) || prev === 'e' || prev === 'l' ||  // true/false/null end chars
             prev === 's' /* for Python "False" → "false" */) {
           // But only if we're inside an array or after a value in an object
           if (top() === '[' || (top() === '{' && prev !== ':')) {
-            out += ',';
+            buf.push(',');
           }
         }
       }
       stack.push(ch === '{' ? '{' : '[');
-      out += ch;
+      buf.push(ch);
       i++;
       continue;
     }
@@ -414,7 +445,7 @@ function repairJSON(s) {
       var expected = ch === '}' ? '{' : '[';
       if (top() === expected) {
         stack.pop();
-        out += ch;
+        buf.push(ch);
       } else if (stack.length === 0) {
         // R11 — Extra closing bracket with no matching open — drop it
         // skip
@@ -422,12 +453,12 @@ function repairJSON(s) {
         // Mismatched close — try to auto-close intervening containers
         // e.g. stack is [ '{', '[' ] and we see '}', close the '[' first
         while (stack.length && top() !== expected) {
-          out += (top() === '{') ? '}' : ']';
+          buf.push((top() === '{') ? '}' : ']');
           stack.pop();
         }
         if (top() === expected) {
           stack.pop();
-          out += ch;
+          buf.push(ch);
         }
       }
       i++;
@@ -436,7 +467,7 @@ function repairJSON(s) {
 
     // ── R1 — Single quotes → double quotes ──
     if (ch === "'") {
-      out += '"';
+      buf.push('"');
       inStr = true;
       i++;
       continue;
@@ -445,30 +476,23 @@ function repairJSON(s) {
     // ── Double-quote: start of string ──
     if (ch === '"') {
       // R5 — Missing comma before a new string value/key
-      if (out.length > 0) {
-        var prevSig2 = '';
-        for (var q = out.length - 1; q >= 0; q--) {
-          var qc = out[q];
-          if (qc !== ' ' && qc !== '\t' && qc !== '\n' && qc !== '\r') {
-            prevSig2 = qc;
-            break;
-          }
-        }
+      if (buf.length > 0) {
+        var prevSig2 = lastSignificant(buf);
         // After a value-terminator inside an array, insert comma
         if (top() === '[' &&
             (prevSig2 === '"' || prevSig2 === '}' || prevSig2 === ']' ||
              /[0-9]/.test(prevSig2) || prevSig2 === 'e' || prevSig2 === 'l')) {
-          out += ',';
+          buf.push(',');
         }
         // After a value in an object (not after a colon or comma or open-brace)
         if (top() === '{' &&
             prevSig2 !== ':' && prevSig2 !== ',' && prevSig2 !== '{' &&
             (prevSig2 === '"' || prevSig2 === '}' || prevSig2 === ']' ||
              /[0-9]/.test(prevSig2) || prevSig2 === 'e' || prevSig2 === 'l')) {
-          out += ',';
+          buf.push(',');
         }
       }
-      out += ch;
+      buf.push(ch);
       inStr = true;
       i++;
       continue;
@@ -476,7 +500,7 @@ function repairJSON(s) {
 
     // ── Colon ──
     if (ch === ':') {
-      out += ch;
+      buf.push(ch);
       i++;
       continue;
     }
@@ -484,7 +508,7 @@ function repairJSON(s) {
     // ── R8 — Illegal literal tokens (NaN, Infinity, undefined, Python bools) ──
     var illegalMatch = matchIllegalLiteral(s, i);
     if (illegalMatch) {
-      out += ILLEGAL_LITERALS[illegalMatch];
+      buf.push(ILLEGAL_LITERALS[illegalMatch]);
       i += illegalMatch.length;
       continue;
     }
@@ -494,23 +518,23 @@ function repairJSON(s) {
       var keyStart = i;
       while (i < len && isKeyChar(s[i])) { i++; }
       var key = s.substring(keyStart, i);
-      out += '"' + key + '"';
+      buf.push('"' + key + '"');
       continue;
     }
 
     // ── Standard JSON literals: true, false, null ──
     if (s.substring(i, i + 4) === 'true') {
-      out += 'true';
+      buf.push('true');
       i += 4;
       continue;
     }
     if (s.substring(i, i + 5) === 'false') {
-      out += 'false';
+      buf.push('false');
       i += 5;
       continue;
     }
     if (s.substring(i, i + 4) === 'null') {
-      out += 'null';
+      buf.push('null');
       i += 4;
       continue;
     }
@@ -518,24 +542,19 @@ function repairJSON(s) {
     // ── Numbers (including negative, decimal, exponent) ──
     if (ch === '-' || (ch >= '0' && ch <= '9')) {
       // R5 — Missing comma before a number in an array
-      if (top() === '[' && out.length > 0) {
-        var prevNum = '';
-        for (var pn = out.length - 1; pn >= 0; pn--) {
-          var pnc = out[pn];
-          if (pnc !== ' ' && pnc !== '\t' && pnc !== '\n' && pnc !== '\r') {
-            prevNum = pnc;
-            break;
-          }
-        }
+      if (top() === '[' && buf.length > 0) {
+        var prevNum = lastSignificant(buf);
         if (/[0-9]/.test(prevNum) || prevNum === '"' || prevNum === '}' ||
             prevNum === ']' || prevNum === 'e' || prevNum === 'l') {
-          out += ',';
+          buf.push(',');
         }
       }
+      var numStr = '';
       while (i < len && /[0-9eE.+\-]/.test(s[i])) {
-        out += s[i];
+        numStr += s[i];
         i++;
       }
+      buf.push(numStr);
       continue;
     }
 
@@ -549,36 +568,37 @@ function repairJSON(s) {
 
   // R6 — Truncated string: close the dangling string
   if (inStr) {
-    out += '"';
+    buf.push('"');
   }
 
   // R10 — If we ended right after a colon (key with no value), insert null
-  if (out.length > 0) {
-    var lastSigChar = '';
-    for (var e = out.length - 1; e >= 0; e--) {
-      var ec = out[e];
-      if (ec !== ' ' && ec !== '\t' && ec !== '\n' && ec !== '\r') {
-        lastSigChar = ec;
+  var lastSigChar = lastSignificant(buf);
+  if (lastSigChar === ':') {
+    buf.push('null');
+  }
+  // Handle trailing comma at the very end — walk backwards through buf
+  // to find and remove it, but ONLY if it's outside any string.
+  if (lastSigChar === ',') {
+    // Remove the trailing comma element from the buffer.
+    // Walk backwards skipping whitespace entries to find the ',' entry.
+    for (var r = buf.length - 1; r >= 0; r--) {
+      var rc = buf[r];
+      if (rc === ' ' || rc === '\t' || rc === '\n' || rc === '\r') continue;
+      if (rc === ',') {
+        buf.splice(r, 1);
         break;
       }
-    }
-    if (lastSigChar === ':') {
-      out += 'null';
-    }
-    // Also handle trailing comma at the very end (after all processing)
-    if (lastSigChar === ',') {
-      // Remove trailing comma before we close containers
-      out = out.substring(0, out.lastIndexOf(','));
+      break; // not a comma — stop
     }
   }
 
   // R7 — Close remaining containers in reverse order
   while (stack.length) {
     var container = stack.pop();
-    out += (container === '{') ? '}' : ']';
+    buf.push((container === '{') ? '}' : ']');
   }
 
-  return out;
+  return buf.join('');
 }
 
 // ─────────────────────────────────────────────────────────
@@ -610,6 +630,14 @@ function repairJSON(s) {
 function jsonguard(input) {
   // Fast path — if input is already valid JSON, skip all repair work.
   if (typeof input === 'string') {
+    // Input size guard — reject oversized payloads early.
+    if (input.length > MAX_INPUT_LENGTH) {
+      return {
+        error: 'Input too large',
+        raw: input.substring(0, 200) + '…',
+        diag: 'Input length ' + input.length + ' exceeds MAX_INPUT_LENGTH ' + MAX_INPUT_LENGTH
+      };
+    }
     try {
       return JSON.parse(input);
     } catch (_) { /* proceed to repair */ }
@@ -630,6 +658,7 @@ function jsonguard(input) {
 // ─────────────────────────────────────────────────────────
 
 module.exports = jsonguard;
-module.exports.jsonguard   = jsonguard;     // named export for ESM compat
-module.exports.extractJSON = extractJSON;   // advanced: noise stripping only
-module.exports.repairJSON  = repairJSON;    // advanced: structural repair only
+module.exports.jsonguard       = jsonguard;       // named export for ESM compat
+module.exports.extractJSON     = extractJSON;     // advanced: noise stripping only
+module.exports.repairJSON      = repairJSON;      // advanced: structural repair only
+module.exports.MAX_INPUT_LENGTH = MAX_INPUT_LENGTH; // configurable size guard

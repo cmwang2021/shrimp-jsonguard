@@ -1,14 +1,14 @@
 /**
  * @file test.js
- * @description Stress-test suite for JSONGuard v1.4
+ * @description Stress-test suite for JSONGuard v1.4.1
  *
- * 35 test cases spanning every repair strategy, from basic passthrough
+ * 40+ test cases spanning every repair strategy, from basic passthrough
  * to hell-level compound failures.  Uses a zero-dependency mini runner
  * so the project stays true to its "one file, one `node test.js`" ethos.
  *
  * Run:  node test.js
  *
- * @version 1.4.0
+ * @version 1.4.1
  * @license MIT
  */
 
@@ -66,7 +66,7 @@ function deepEqual(a, b) {
 //  Test cases
 // ─────────────────────────────────────────────────────────
 
-console.log('\n🦐 JSONGuard v1.4 — Stress Test Suite\n');
+console.log('\n🦐 JSONGuard v1.4.1 — Stress Test Suite\n');
 console.log('═══════════════════════════════════════\n');
 
 // ── 1. Basics ────────────────────────────────────────────
@@ -189,6 +189,16 @@ test('Nested unquoted keys',
   '{user: {name: "Shrimp", stats: {hp: 100}}}',
   { user: { name: 'Shrimp', stats: { hp: 100 } } });
 
+// ── 7b. Dash / dot in unquoted keys (蝦馬仕 bug #1) ────
+
+test('Kebab-case unquoted key',
+  '{my-key: 1, another-one: 2}',
+  { 'my-key': 1, 'another-one': 2 });
+
+test('Dotted unquoted key',
+  '{my.key: "value"}',
+  { 'my.key': 'value' });
+
 // ── 8. Illegal values ───────────────────────────────────
 
 console.log('\n▸ Illegal Values');
@@ -253,7 +263,23 @@ test('Empty array',
   '[]',
   []);
 
-// ── 13. Hell-level compound failures ─────────────────────
+// ── 13. Trailing comma in string (蝦馬仕 bug #2) ────────
+
+console.log('\n▸ Trailing Comma In String (Bug Fix)');
+
+test('Truncated after value containing comma',
+  '{"msg": "hello, world",',
+  { msg: 'hello, world' });
+
+test('Value with commas + truncation',
+  '{"items": "a, b, c", "count": 3,',
+  { items: 'a, b, c', count: 3 });
+
+test('Nested commas in string values',
+  '{"addr": "123 Main St, Suite 4, NY",}',
+  { addr: '123 Main St, Suite 4, NY' });
+
+// ── 14. Hell-level compound failures ─────────────────────
 
 console.log('\n▸ Hell-Level Compound');
 
@@ -264,6 +290,10 @@ test('Markdown + trailing comma + truncation',
 test('Prose + single-quotes + illegal values + truncation',
   "Here is the result: {'score': Infinity, 'valid': True, 'data': [1, 2",
   { score: null, valid: true, data: [1, 2] });
+
+test('Kebab keys + trailing comma + truncation',
+  '{my-key: "val", another-key: [1, 2,',
+  { 'my-key': 'val', 'another-key': [1, 2] });
 
 // ─────────────────────────────────────────────────────────
 //  Results
@@ -281,5 +311,5 @@ if (failed > 0) {
   process.exit(1);
 } else {
   console.log('  Failed: 0');
-  console.log('\n  \x1b[32m🦐 All tests passed! JSONGuard v1.4 is battle-ready. ⚔️\x1b[0m\n');
+  console.log('\n  \x1b[32m🦐 All tests passed! JSONGuard v1.4.1 is battle-ready. ⚔️\x1b[0m\n');
 }
