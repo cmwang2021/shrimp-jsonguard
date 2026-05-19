@@ -1,6 +1,6 @@
 /**
  * @file test.js
- * @description Stress-test suite for JSONGuard v1.4.1
+ * @description Stress-test suite for JSONGuard v1.4.2
  *
  * 40+ test cases spanning every repair strategy, from basic passthrough
  * to hell-level compound failures.  Uses a zero-dependency mini runner
@@ -8,7 +8,7 @@
  *
  * Run:  node test.js
  *
- * @version 1.4.1
+ * @version 1.4.2
  * @license MIT
  */
 
@@ -66,7 +66,7 @@ function deepEqual(a, b) {
 //  Test cases
 // ─────────────────────────────────────────────────────────
 
-console.log('\n🦐 JSONGuard v1.4.1 — Stress Test Suite\n');
+console.log('\n🦐 JSONGuard v1.4.2 — Stress Test Suite\n');
 console.log('═══════════════════════════════════════\n');
 
 // ── 1. Basics ────────────────────────────────────────────
@@ -295,6 +295,47 @@ test('Kebab keys + trailing comma + truncation',
   '{my-key: "val", another-key: [1, 2,',
   { 'my-key': 'val', 'another-key': [1, 2] });
 
+// ── 15. BOM / NUL / Depth protection (蝦馬仕 round-2) ───
+
+console.log('\n▸ BOM / NUL / Depth Guard');
+
+test('BOM prefix stripped',
+  '\uFEFF{"clean": true}',
+  { clean: true });
+
+test('BOM + Markdown fence',
+  '\uFEFF```json\n{"a": 1}\n```',
+  { a: 1 });
+
+test('NUL bytes removed',
+  '{"a": "hel\u0000lo", "b": 2}',
+  { a: 'hello', b: 2 });
+
+test('NUL byte in key',
+  '{"ke\u0000y": 1}',
+  { key: 1 });
+
+// Nesting depth guard — build a deeply nested input and verify it
+// doesn't crash (just returns a best-effort parse or diagnostic).
+(function() {
+  var depth = 600;
+  var deep = '';
+  for (var d = 0; d < depth; d++) { deep += '{"d":'; }
+  deep += '1';
+  for (var d2 = 0; d2 < depth; d2++) { deep += '}'; }
+  var result = jsonguard(deep);
+  // Should not throw — either a result or a diagnostic object
+  var ok = (typeof result === 'object' && result !== null);
+  if (ok) {
+    passed++;
+    console.log('  \x1b[32m✓\x1b[0m Nesting depth guard (600 levels) — no crash');
+  } else {
+    failed++;
+    errors.push({ label: 'Nesting depth guard', input: '(600 deep)', expected: 'object', got: result });
+    console.log('  \x1b[31m✗\x1b[0m Nesting depth guard (600 levels)');
+  }
+})();
+
 // ─────────────────────────────────────────────────────────
 //  Results
 // ─────────────────────────────────────────────────────────
@@ -311,5 +352,5 @@ if (failed > 0) {
   process.exit(1);
 } else {
   console.log('  Failed: 0');
-  console.log('\n  \x1b[32m🦐 All tests passed! JSONGuard v1.4.1 is battle-ready. ⚔️\x1b[0m\n');
+  console.log('\n  \x1b[32m🦐 All tests passed! JSONGuard v1.4.2 is battle-ready. ⚔️\x1b[0m\n');
 }

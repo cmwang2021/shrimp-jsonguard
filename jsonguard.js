@@ -1,6 +1,6 @@
 /**
  * @module jsonguard
- * @version 1.4.1
+ * @version 1.4.2
  * @description Deterministic JSON repair engine for LLM output.
  *
  * Implements a three-phase repair pipeline:
@@ -19,6 +19,8 @@
  *   • Non-destructive — valid JSON passes through untouched.
  *   • Defence-in-depth — regex for *text cleanup*, state machine for
  *     *structural repair*.  Never the other way around.
+ *   • Safe-by-default — MAX_INPUT_LENGTH and MAX_NESTING_DEPTH guards
+ *     prevent denial-of-service on untrusted input.
  *
  * Performance:
  *   • O(n) time complexity — single-pass state machine, no backtracking.
@@ -51,6 +53,16 @@
  * @type {number}
  */
 var MAX_INPUT_LENGTH = 5 * 1024 * 1024; // 5 MB
+
+/**
+ * Maximum nesting depth for JSON structures.  If the repair engine
+ * encounters nesting deeper than this limit, it stops opening new
+ * containers to prevent stack overflow from adversarial input.
+ * Override via `jsonguard.MAX_NESTING_DEPTH = <number>`.
+ *
+ * @type {number}
+ */
+var MAX_NESTING_DEPTH = 512;
 
 // ─────────────────────────────────────────────────────────
 //  Phase 0 — Extract: isolate the JSON payload from noise
@@ -195,6 +207,15 @@ function extractPayload(s) {
 function extractJSON(input) {
   if (typeof input !== 'string') { return ''; }
   var s = input;
+
+  // Strip BOM (Byte Order Mark) — Windows Notepad and some editors prepend
+  // \uFEFF to UTF-8 files, which breaks JSON.parse().
+  if (s.charCodeAt(0) === 0xFEFF) { s = s.substring(1); }
+
+  // Strip NUL bytes (\u0000) — some LLMs emit null characters in their
+  // output stream, which are invisible but fatal to JSON.parse().
+  if (s.indexOf('\u0000') !== -1) { s = s.replace(/\u0000/g, ''); }
+
   s = stripMarkdownFences(s);
   s = stripComments(s);
   s = extractPayload(s);
@@ -434,6 +455,11 @@ function repairJSON(s) {
           }
         }
       }
+      // Nesting depth guard — prevent stack overflow from adversarial input
+      if (stack.length >= MAX_NESTING_DEPTH) {
+        i++; // skip this opening bracket
+        continue;
+      }
       stack.push(ch === '{' ? '{' : '[');
       buf.push(ch);
       i++;
@@ -659,6 +685,7 @@ function jsonguard(input) {
 
 module.exports = jsonguard;
 module.exports.jsonguard       = jsonguard;       // named export for ESM compat
-module.exports.extractJSON     = extractJSON;     // advanced: noise stripping only
-module.exports.repairJSON      = repairJSON;      // advanced: structural repair only
-module.exports.MAX_INPUT_LENGTH = MAX_INPUT_LENGTH; // configurable size guard
+module.exports.extractJSON       = extractJSON;       // advanced: noise stripping only
+module.exports.repairJSON        = repairJSON;        // advanced: structural repair only
+module.exports.MAX_INPUT_LENGTH  = MAX_INPUT_LENGTH;  // configurable size guard
+module.exports.MAX_NESTING_DEPTH = MAX_NESTING_DEPTH; // configurable depth guard

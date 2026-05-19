@@ -47,5 +47,11 @@ export declare function repairJSON(s: string): string;
  */
 export declare var MAX_INPUT_LENGTH: number;
 
+/**
+ * Maximum nesting depth for JSON structures (default: 512).
+ * Prevents stack overflow from adversarial deeply-nested input.
+ */
+export declare var MAX_NESTING_DEPTH: number;
+
 export default jsonguard;
 export { jsonguard };

@@ -1,6 +1,6 @@
 {
   "name": "shrimp-jsonguard",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "The most resilient JSON repair engine for LLM output. Zero dependencies. One click to heal your JSON pains.",
   "main": "jsonguard.js",
   "types": "index.d.ts",
